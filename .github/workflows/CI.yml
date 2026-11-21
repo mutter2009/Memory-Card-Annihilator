@@ -1,149 +1,70 @@
-name: Compile MCA
+name: Compile MCA (manual)
 
-# Ensure only one workflow run can manage the "latest" release at a time to prevent race conditions. Let version releases run concurrently.
-concurrency: 
-  group: ${{ github.ref == 'refs/heads/master' && 'latest-release' || format('version-release-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/master' }}
+# 手动编译：仅 workflow_dispatch 触发，push 不会自动编译。
+#
+# 为什么这样写：
+#   - 本项目需要 ps2dev/ps2dev:v1.0 这套老 SDK 才能编译（新版 ps2sdk 已删除 IOP 的 sys/stat.h，
+#     会连环报错）。
+#   - 但 v1.0 容器的 musl 太老，跑不动 GitHub Actions 现在的 node24 运行时（之前 checkout 就崩）。
+#   - 所以：job 跑在 ubuntu-latest（node 正常，能用 actions/checkout 与 upload-artifact），
+#     只在里面用 docker 调用 v1.0 容器完成真正的编译。产物通过 upload-artifact 落到 Artifacts。
+#
+# 只编译两个通用版本（精简字体版）：
+#   - mca_legacy: 使用主机自带 MCMAN（XOSD 模块），旧版系统/环境通用
+#   - mca_new:    内置 homebrew mcman + exFAT USB 支持，新版环境通用
+#   - Arcade/Prototype/Developer 等特殊记忆卡版本不再编译。
 
 on:
   workflow_dispatch:
     inputs:
-      make_args:
-        description: pass extra make argumments to control features not explicitly handled by CI
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'  # Match version tags like v2.1.0 or v2.1.1-beta
-    branches:
-      - '**'
-  pull_request:
-    branches:
-      - master
-  repository_dispatch:
-    types: [run_build]
+      version:
+        description: '程序内显示的版本号（默认 v2.2.0，与上游发布版一致）'
+        required: false
+        default: 'v2.2.0'
+        type: string
+
+permissions:
+  contents: read   # 只上传 Artifacts，不需要写仓库
+
+concurrency:
+  group: mca-manual-build
+  cancel-in-progress: false
 
 jobs:
   build:
-    if: |
-      github.event_name != 'pull_request' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
-    container: ps2dev/ps2dev:v1.0
     steps:
 
-    - name: Install dependencies
-      run: |
-        apk add make git zip
-
-    - uses: actions/checkout@v4
-    - run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        git fetch --prune --unshallow
+    - name: Checkout
+      uses: actions/checkout@v4
 
     - name: Set build timestamp
-      if: "!startsWith(github.ref, 'refs/tags/v')"
-      run: |
-        echo "BUILD_TIMESTAMP=$(date -u '+%Y-%m-%d_%H-%M-%S')" >> $GITHUB_ENV
-        echo "VERSION=ref:$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      run: echo "BUILD_TIMESTAMP=$(date -u '+%Y-%m-%d_%H-%M-%S')" >> "$GITHUB_ENV"
 
-    - name: Set version for tagged builds
-      if: startsWith(github.ref, 'refs/tags/v')
+    - name: Compile (inside ps2dev/ps2dev:v1.0 via docker)
       run: |
-        echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+        # 版本号：默认 v2.2.0（与上游发布版一致），可在手动触发时填写其他值。
+        # 原版 CI 只有「打 tag 构建」才显示 v2.2.0，普通构建会显示 ref:<commit>。
+        VERSION="${{ inputs.version || 'v2.2.0' }}"
+        echo "程序内显示版本: $VERSION"
+        docker run --rm \
+          -e VERSION="$VERSION" \
+          -v "$GITHUB_WORKSPACE":/work -w /work \
+          ps2dev/ps2dev:v1.0 sh -c "
+          git config --global --add safe.directory /work || true
+          apk add --no-cache make git zip curl >/dev/null 2>&1 || true
+          cd MCA && \
+          make clean all packlang EE_BIN_DIR=../mca_legacy   VERSION=$VERSION MCMAN_TYPE=XOSD && \
+          make clean all packlang EE_BIN_DIR=../mca_new      VERSION=$VERSION EXFAT=1
+        "
 
-    - name: Compile
+    - name: Pack
       run: |
-        make clean all packlang -C MCA EE_BIN_DIR=../mca_legacy VERSION=${{ env.VERSION }} MCMAN_TYPE=XOSD
-        make clean all packlang -C MCA EE_BIN_DIR=../mca_new VERSION=${{ env.VERSION }} EXFAT=1
-        make clean all packlang -C MCA EE_BIN_DIR=../mca_Arcade VERSION=${{ env.VERSION }} EXFAT=1 MGMODE=ARCADE
-        make clean all packlang -C MCA EE_BIN_DIR=../mca_Prototype VERSION=${{ env.VERSION }} EXFAT=1 MGMODE=PROTOTYPE
-        make clean all packlang -C MCA EE_BIN_DIR=../mca_Developer VERSION=${{ env.VERSION }} EXFAT=1 MGMODE=DEVELOPER
+        zip -r "MemoryCardAnihilator_${{ env.BUILD_TIMESTAMP }}.zip" \
+          ./mca_legacy/* ./mca_new/* README.MD LICENSE
 
-    - name: Pack versioned
-      if: startsWith(github.ref, 'refs/tags/v')
-      run: |
-        zip -r "MemoryCardAnihilator_${{ github.ref_name }}.zip" ./mca_legacy/* ./mca_new/* ./mca_Arcade/* ./mca_Prototype/* ./mca_Developer/* README.MD LICENSE
-
-    - name: Pack latest/branch
-      if: "!startsWith(github.ref, 'refs/tags/v')"
-      run: |
-        zip -r "MemoryCardAnihilator_${{ env.BUILD_TIMESTAMP }}.zip" ./mca_legacy/* ./mca_new/* ./mca_Arcade/* ./mca_Prototype/* ./mca_Developer/* README.MD LICENSE
-
-    - name: Upload variants artifact ELF (versioned)
-      if: startsWith(github.ref, 'refs/tags/v')
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: "MCA"
-        path: "MemoryCardAnihilator_${{ github.ref_name }}.zip"
-
-    - name: Upload variants artifact ELF (non-versioned)
-      if: "!startsWith(github.ref, 'refs/tags/v')"
-      uses: actions/upload-artifact@v4
-      with:
-        name: "MCA"
-        path: "MemoryCardAnihilator_${{ env.BUILD_TIMESTAMP }}.zip"
-
-    - name: Delete previous latest release
-      if: github.ref == 'refs/heads/master'
-      uses: actions/github-script@v7
-      with:
-        retries: 3
-        script: |
-          async function deleteLatestRelease() {
-            try {
-              // Find the release with tag "latest"
-              const release = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag: 'latest'
-              });
-              
-              // Delete the release if found
-              if (release && release.data) {
-                await github.rest.repos.deleteRelease({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  release_id: release.data.id
-                });
-              }
-              
-              // Delete the tag
-              try {
-                await github.rest.git.deleteRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: 'tags/latest'
-                });
-              } catch (e) {
-                // Tag might not exist, that's ok
-                console.log("Tag doesn't exist");
-              }
-            } catch (e) {
-              if (e.status === 404) {
-                console.log('Release or tag not found - this is ok for the first run');
-              } else {
-                throw e; // Re-throw other errors to trigger retry
-              }
-            }
-          }
-          
-          // Execute with exponential backoff (built in the GitHub Script action)
-          await deleteLatestRelease();
-
-    - name: Create latest release
-      if: github.ref == 'refs/heads/master'
-      uses: softprops/action-gh-release@v1
-      with:
-        files: "MemoryCardAnihilator_${{ env.BUILD_TIMESTAMP }}.zip"
-        name: "Latest automated build (${{ env.BUILD_TIMESTAMP }} UTC)"
-        tag_name: latest
-        prerelease: true
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Create release for version tags
-      if: startsWith(github.ref, 'refs/tags/v')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: "MemoryCardAnihilator_${{ github.ref_name }}.zip"
-        name: "Release ${{ github.ref_name }}"
-        generate_release_notes: true
-        token: ${{ secrets.GITHUB_TOKEN }}
+        name: MCA
+        path: MemoryCardAnihilator_${{ env.BUILD_TIMESTAMP }}.zip
