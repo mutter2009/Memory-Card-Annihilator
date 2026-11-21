@@ -67,8 +67,8 @@ all: $(IOP_DIRS)
 	echo "Compressing..."
 	ps2-packer $(EE_BIN) $(EE_BIN_COMPR) | grep "File compressed"
 
+# CN localization: language is built into the ELF, no external .lng files
 packlang:
-	cp lng/*.lng $(EE_BIN_DIR)/
 
 ifdef MGMODE
 $(info -- Building for $(MGMODE) MemoryCards)

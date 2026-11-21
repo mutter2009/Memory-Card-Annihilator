@@ -118,29 +118,11 @@ int CPS2Application::main(int argc, char *argv[])
 
 bool CPS2Application::initLanguage(const std::string& bootPath)
 {
-	static const char* languageFiles[] = {
-		"lang_jp.lng",	// Japanese does not have a valid font yet
-		"lang_en.lng",
-		"lang_fr.lng",
-		"lang_es.lng",
-		"lang_de.lng",
-		"lang_it.lng",
-		"lang_du.lng",
-		"lang_pt.lng",
-		"lang_ru.lng", // Russian and further languages require XEB+ 2024 or newer in order to be detected. Else, they will default to English.
-		// Korean, Traditional and Simplified Chinese do not have a valid font yet
-	};
-	
-	std::string defaultLangFile = bootPath + "lang.lng";
-	if (loadLanguage(defaultLangFile))
-		return true;
-
-	int systemLanguage = configGetLanguage();
-	if (systemLanguage < 0 || systemLanguage >= static_cast<int>(countof(languageFiles)))
-		return false;
-
-	std::string systemLanguageFile = bootPath + languageFiles[systemLanguage];
-	return loadLanguage(systemLanguageFile);
+	// CN localization: all UI strings are embedded in the ELF itself
+	// (see GUIMcaLang.cpp, m_default_lang_raw). External .lng files are
+	// neither loaded nor shipped, so the interface is always Chinese
+	// regardless of the console locale or boot device contents.
+	return true;
 }
 
 std::string CPS2Application::processHddBootPath(const std::string& bootPath) 
